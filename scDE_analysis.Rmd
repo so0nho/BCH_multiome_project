@@ -1,0 +1,422 @@
+---
+title: "Pseudobulk differential expression analysis"
+---
+
+Perform a pseudobulk differential expression analysis between conditions (TAC vs. healthy, Aged vs. healthy) in cardiomyocytes. 
+
+
+```{r}
+library(DESeq2)
+library(Seurat)
+library(Signac)
+library(tidyverse)
+library(clusterProfiler)
+library(pheatmap)
+library(org.Mm.eg.db)
+
+here::i_am("scDE_analysis.Rmd")
+set.seed(1)
+```
+
+
+```{r}
+seu_obj <- readRDS("/scratch/kwon.so/preprocessed_individual.rds")
+
+# rename conditions
+seu_obj@meta.data$condition[seu_obj@meta.data$condition == "4M-H"] <- "M4H"
+seu_obj@meta.data$condition[seu_obj@meta.data$condition == "28M"] <- "M28"
+```
+
+
+1. Subsetting to the cells for the cell type(s) of interest to perform the DE analysis.
+2. Extracting the raw counts after QC filtering to be used for the DE analysis
+  - seu_obj@assay$RNA@counts
+3. Aggregating the counts and metadata to the sample level.
+4. Performing the DE analysis (Need at least two biological replicates per condition to perform the analysis, but more replicates are recommended).
+
+
+To pseudobulk, we will use AggregateExpression() to sum together gene counts of all the cells from the same sample for each cell type. This results in one gene expression profile per sample and cell type. We can then perform DE analysis using DESeq2 on the sample level. This treats the samples, rather than the individual cells, as independent observations.
+
+# Splitting data (pseudo replicates)
+```{r}
+# randomly split seu_obj into three (pseudosamples)
+n <- nrow(seu_obj@meta.data)
+split_id <- sample(rep(1:3, length.out = n))
+
+samp_1 <- seu_obj@meta.data[split_id == 1, ]
+samp_2 <- seu_obj@meta.data[split_id == 2, ]
+samp_3 <- seu_obj@meta.data[split_id == 3, ]
+
+# adding replicate metadata
+samp_1$replicate <- "R1"
+samp_2$replicate <- "R2"
+samp_3$replicate <- "R3"
+
+# merge replicates into one dataframe 
+seu <- rbind(samp_1, samp_2, samp_3) 
+
+# add replicate metadata to seurat object
+seu <- seu %>% rownames_to_column("cells") %>% dplyr::select(cells, replicate)
+seu_obj@meta.data <- seu_obj@meta.data %>% rownames_to_column("cells")
+
+# add replicate information to seu_obj 
+seu_obj@meta.data <- left_join(seu_obj@meta.data, seu, by = join_by(cells)) %>% column_to_rownames("cells")
+```
+
+
+# Subset for cell types
+```{r}
+cell_types <- c("CM", "FB", "EC", "Macro")
+pbulk_list <- list()
+
+for (cell in cell_types) {
+  seurat_ct <- subset(seu_obj, subset = (cell_type == cell))
+  
+  bulk_ct <- AggregateExpression(seurat_ct, 
+                                 assay = "RNA", 
+                                 return.seurat = T, 
+                                 group.by = c("replicate", "condition"))
+  
+  # Add number of cells per sample
+  n_cells <- seurat_ct@meta.data %>% 
+                dplyr::count(replicate, condition)
+                
+  meta_bulk_ct <- left_join(bulk_ct@meta.data, n_cells)
+  rownames(meta_bulk_ct) <- meta_bulk_ct$orig.ident
+  bulk_ct@meta.data <- meta_bulk_ct
+  
+  # turn condition into factor
+  bulk_ct$condition <- relevel(factor(bulk_ct$condition, levels = c("TAC", "M28", "Neonate", "M4H")), ref = "M4H")
+  
+  pbulk_list[[cell]] <- bulk_ct
+}
+```
+
+# Differential expression
+## CM
+```{r}
+cm_TvH <- subset(pbulk_list[["CM"]], subset = condition %in% c("TAC", "M4H"))
+cm_AvH <- subset(pbulk_list[["CM"]], subset = condition %in% c("M28", "M4H"))
+
+# counts matrix
+cmT_counts <- FetchData(cm_TvH, layer = "counts", vars = rownames(cm_TvH))
+cmA_counts <- FetchData(cm_AvH, layer = "counts", vars = rownames(cm_AvH))
+cm_counts <- FetchData(pbulk_list[["CM"]], layer = "counts", vars = rownames(pbulk_list[["CM"]])) 
+
+# Create DESeq2 object
+dds_T <- DESeqDataSetFromMatrix(t(cmT_counts), colData = cm_TvH@meta.data, design = ~condition)
+dds_A <- DESeqDataSetFromMatrix(t(cmA_counts), colData = cm_AvH@meta.data, design = ~condition)
+dds_cm <- DESeqDataSetFromMatrix(t(cm_counts), colData = pbulk_list[["CM"]]@meta.data, design = ~condition)
+```
+
+### QC
+```{r}
+rldT <- rlog(dds_T, blind = T)
+rldA <- rlog(dds_A, blind = T)
+rldCM <- rlog(dds_cm, blind = T)
+
+plotPCA(rldT, intgroup=c("condition")) 
+plotPCA(rldA, intgroup=c("condition"))
+plotPCA(rldCM, intgroup = "condition")
+
+# heatmap
+Trld_mat <- assay(rldT)
+Arld_mat <- assay(rldA)
+CMrld_mat <- assay(rldCM)
+
+Trld_cor <- cor(Trld_mat)
+Arld_cor <- cor(Arld_mat)
+CMrld_cor <- cor(CMrld_mat)
+
+##  heatmap annotation
+cm_heatmap_anno <- data.frame(row.names = colnames(pbulk_list[["CM"]]),
+                              condition = pbulk_list[["CM"]]$condition)
+
+pheatmap(Trld_cor, annotation_col = cm_heatmap_anno)
+pheatmap(Arld_cor, annotation_col = cm_heatmap_anno)
+pheatmap(CMrld_cor, annotation_col = cm_heatmap_anno)
+```
+
+### Run DESeq
+```{r}
+dds_T <- DESeq(dds_T)
+dds_A <- DESeq(dds_A)
+dds_cm <- DESeq(dds_cm)
+
+res_t <- results(dds_T, contrast = c("condition", "TAC", "M4H"), alpha = 0.05)
+res_a <- results(dds_A, contrast = c("condition", "M28", "M4H"), alpha = 0.05)
+res_cm <- results(dds_cm, contrast = c("condition", "TAC", "M4H"), alpha = 0.05)
+
+# shrinkage
+res_t <- lfcShrink(dds_T, coef = "condition_TAC_vs_M4H", res = res_t, type = "apeglm")
+res_a <- lfcShrink(dds_A, coef = "condition_M28_vs_M4H", res = res_a, type = "apeglm")
+res_cm <- lfcShrink(dds_cm, coef = "condition_TAC_vs_M4H", res = res_cm, type = "apeglm")
+
+
+# results
+res_t_df <- res_t %>% 
+  data.frame %>% 
+  rownames_to_column("gene_symbol") %>% 
+  dplyr::filter(padj < 0.05)
+
+res_a_df <- res_a %>% 
+  data.frame %>% 
+  rownames_to_column("gene_symbol") %>% 
+  dplyr::filter(padj < 0.05)
+  
+res_cm_df <- res_cm %>% 
+  data.frame %>% 
+  rownames_to_column("gene_symbol") %>% 
+  dplyr::filter(padj < 0.05)
+```
+
+### Gene set enrichment analysis
+```{r}
+cm_t_genes <- res_t_df$log2FoldChange
+cm_a_genes <- res_a_df$log2FoldChange
+
+names(cm_t_genes) <- res_t_df$gene_symbol
+names(cm_a_genes) <- res_a_df$gene_symbol
+
+cm_t_genes <- sort(cm_t_genes, decreasing = T)
+cm_a_genes <- sort(cm_a_genes, decreasing = T)
+
+ego_cm_t <- enrichGO(gene = names(cm_t_genes), 
+                     universe = rownames(res_t), 
+                     keyType = "SYMBOL", 
+                     OrgDb = org.Mm.eg.db, 
+                     ont = "BP", 
+                     qvalueCutoff = 0.05, 
+                     readable = TRUE)
+
+ego_cm_a <- enrichGO(gene = names(cm_a_genes), 
+                     universe = rownames(res_a), 
+                     keyType = "SYMBOL", 
+                     OrgDb = org.Mm.eg.db, 
+                     ont = "BP", 
+                     qvalueCutoff = 0.05, 
+                     readable = TRUE)
+
+barplot(ego_cm_t, showCategory = 20)
+barplot(ego_cm_a, showCategory = 20)
+
+#### USE a heatmap for differentially expressed genes
+```
+
+## FB
+```{r}
+fb_TvH <- subset(pbulk_list[["FB"]], subset = condition %in% c("TAC", "M4H"))
+fb_AvH <- subset(pbulk_list[["FB"]], subset = condition %in% c("M28", "M4H"))
+
+# counts matrix
+fbT_counts <- FetchData(fb_TvH, layer = "counts", vars = rownames(fb_TvH))
+fbA_counts <- FetchData(fb_AvH, layer = "counts", vars = rownames(fb_AvH))
+fb_counts <- FetchData(pbulk_list[["FB"]], layer = "counts", vars = rownames(pbulk_list[["FB"]])) 
+
+# Create DESeq2 object
+dds_T <- DESeqDataSetFromMatrix(t(fbT_counts), colData = fb_TvH@meta.data, design = ~condition)
+dds_A <- DESeqDataSetFromMatrix(t(fbA_counts), colData = fb_AvH@meta.data, design = ~condition)
+dds_fb <- DESeqDataSetFromMatrix(t(fb_counts), colData = pbulk_list[["FB"]]@meta.data, design = ~condition)
+```
+
+
+### QC
+```{r}
+rldT <- rlog(dds_T, blind = T)
+rldA <- rlog(dds_A, blind = T)
+rldFB <- rlog(dds_cm, blind = T)
+
+plotPCA(rldT, intgroup=c("condition")) 
+plotPCA(rldA, intgroup=c("condition"))
+plotPCA(rldFB, intgroup = "condition")
+
+# heatmap
+Trld_mat <- assay(rldT)
+Arld_mat <- assay(rldA)
+FBrld_mat <- assay(rldFB)
+
+Trld_cor <- cor(Trld_mat)
+Arld_cor <- cor(Arld_mat)
+FBrld_cor <- cor(FBrld_mat)
+
+##  heatmap annotation
+fb_heatmap_anno <- data.frame(row.names = colnames(pbulk_list[["FB"]]),
+                              condition = pbulk_list[["FB"]]$condition)
+
+pheatmap(Trld_cor, annotation_col = fb_heatmap_anno)
+pheatmap(Arld_cor, annotation_col = fb_heatmap_anno)
+pheatmap(CMrld_cor, annotation_col = fb_heatmap_anno)
+```
+
+### Run DESeq
+```{r}
+dds_T <- DESeq(dds_T)
+dds_A <- DESeq(dds_A)
+dds_fb <- DESeq(dds_fb)
+
+res_t <- results(dds_T, contrast = c("condition", "TAC", "M4H"), alpha = 0.05)
+res_a <- results(dds_A, contrast = c("condition", "M28", "M4H"), alpha = 0.05)
+res_fb <- results(dds_fb, contrast = c("condition", "TAC", "M4H"), alpha = 0.05)
+
+# shrinkage
+res_t <- lfcShrink(dds_T, coef = "condition_TAC_vs_M4H", res = res_t, type = "apeglm")
+res_a <- lfcShrink(dds_A, coef = "condition_M28_vs_M4H", res = res_a, type = "apeglm")
+res_fb <- lfcShrink(dds_fb, coef = "condition_TAC_vs_M4H", res = res_fb, type = "apeglm")
+
+
+# Results
+res_t_df <- res_t %>% 
+  data.frame %>% 
+  rownames_to_column("gene_symbol") %>% 
+  dplyr::filter(padj < 0.05)
+
+res_a_df <- res_a %>% 
+  data.frame %>% 
+  rownames_to_column("gene_symbol") %>% 
+  dplyr::filter(padj < 0.05)
+
+res_fb_df <- res_fb %>% 
+  data.frame %>% 
+  rownames_to_column("gene_symbol") %>% 
+  dplyr::filter(padj < 0.05)
+```
+
+
+### Overrepresentation pathway
+```{r}
+fb_t_genes <- res_t_df$log2FoldChange
+fb_a_genes <- res_a_df$log2FoldChange
+
+names(fb_t_genes) <- res_t_df$gene_symbol
+names(fb_a_genes) <- res_a_df$gene_symbol
+
+fb_t_genes <- sort(fb_t_genes, decreasing = T)
+fb_a_genes <- sort(fb_a_genes, decreasing = T)
+
+ego_fb_t <- enrichGO(gene = names(fb_t_genes), 
+                     universe = rownames(res_t), 
+                     keyType = "SYMBOL", 
+                     OrgDb = org.Mm.eg.db, 
+                     ont = "BP", 
+                     qvalueCutoff = 0.05, 
+                     readable = TRUE)
+
+ego_fb_a <- enrichGO(gene = names(fb_a_genes), 
+                     universe = rownames(res_a), 
+                     keyType = "SYMBOL", 
+                     OrgDb = org.Mm.eg.db, 
+                     ont = "BP", 
+                     qvalueCutoff = 0.05, 
+                     readable = TRUE)
+
+barplot(ego_fb_t, showCategory = 20)
+barplot(ego_fb_a, showCategory = 20)
+```
+
+## EC
+```{r}
+ec_TvH <- subset(pbulk_list[["EC"]], subset = condition %in% c("TAC", "M4H"))
+ec_AvH <- subset(pbulk_list[["EC"]], subset = condition %in% c("M28", "M4H"))
+
+# counts matrix
+ecT_counts <- FetchData(ec_TvH, layer = "counts", vars = rownames(ec_TvH))
+ecA_counts <- FetchData(ec_AvH, layer = "counts", vars = rownames(ec_AvH))
+ec_counts <- FetchData(pbulk_list[["EC"]], layer = "counts", vars = rownames(pbulk_list[["EC"]])) 
+
+# Create DESeq2 object
+dds_t <- DESeqDataSetFromMatrix(t(ecT_counts), colData = ec_TvH@meta.data, design = ~condition)
+dds_a <- DESeqDataSetFromMatrix(t(ecA_counts), colData = ec_AvH@meta.data, design = ~condition)
+dds_ec <- DESeqDataSetFromMatrix(t(ec_counts), colData = pbulk_list[["EC"]]@meta.data, design = ~condition)
+
+
+##### QC
+rld_t <- rlog(dds_t, blind = T)
+rld_a <- rlog(dds_a, blind = T)
+rld_ec <- rlog(dds_ec, blind = T)
+
+plotPCA(rld_t, intgroup = "condition")
+plotPCA(rld_a, intgroup = "condition")
+plotPCA(rld_ec, intgroup = "condition")
+
+rld_t_mat <- assay(rld_t)
+rld_a_mat <- assay(rld_a)
+rld_ec_mat <- assay(rld_ec)
+
+rld_t_cor <- cor(rld_t_mat)
+rld_a_cor <- cor(rld_a_mat)
+rld_ec_cor <- cor(rld_ec_mat)
+
+##  heatmap annotation
+ec_heatmap_anno <- data.frame(row.names = colnames(pbulk_list[["EC"]]),
+                              condition = pbulk_list[["EC"]]$condition)
+
+pheatmap(rld_t_cor, annotation_col = ec_heatmap_anno)
+pheatmap(rld_a_cor, annotation_col = ec_heatmap_anno)
+pheatmap(rld_ec_cor, annotation_col = ec_heatmap_anno)
+```
+
+### Differential test
+```{r}
+dds_t <- DESeq(dds_t)
+dds_a <- DESeq(dds_a)
+dds_ec <- DESeq(dds_ec)
+
+res_t <- results(dds_t, contrast = c("condition", "TAC", "M4H"), alpha = 0.05)
+res_a <- results(dds_a, contrast = c("condition", "M28", "M4H"), alpha = 0.05)
+res_ec <- results(dds_ec, contrast = c("condition", "TAC", "M4H"), alpha = 0.05)
+
+# shrinkage
+res_t <- lfcShrink(dds_t, coef = "condition_TAC_vs_M4H", res = res_t, type = "apeglm")
+res_a <- lfcShrink(dds_a, coef = "condition_M28_vs_M4H", res = res_a, type = "apeglm")
+res_ec <- lfcShrink(dds_ec, coef = "condition_TAC_vs_M4H", res = res_ec, type = "apeglm")
+
+
+# Results
+res_t_df <- res_t %>% 
+  data.frame %>% 
+  rownames_to_column("gene_symbol") %>% 
+  dplyr::filter(padj < 0.05)
+
+res_a_df <- res_a %>% 
+  data.frame %>% 
+  rownames_to_column("gene_symbol") %>% 
+  dplyr::filter(padj < 0.05)
+
+res_ec_df <- res_ec %>% 
+  data.frame %>% 
+  rownames_to_column("gene_symbol") %>% 
+  dplyr::filter(padj < 0.05)
+```
+
+### Overrepresentation 
+```{r}
+ec_t_genes <- res_t_df$log2FoldChange
+ec_a_genes <- res_a_df$log2FoldChange
+
+names(ec_t_genes) <- res_t_df$gene_symbol
+names(ec_a_genes) <- res_a_df$gene_symbol
+
+ec_t_genes <- sort(ec_t_genes, decreasing = T)
+ec_a_genes <- sort(ec_a_genes, decreasing = T)
+
+ego_ec_t <- enrichGO(gene = names(ec_t_genes), 
+                     universe = rownames(res_t), 
+                     keyType = "SYMBOL", 
+                     OrgDb = org.Mm.eg.db, 
+                     ont = "BP", 
+                     qvalueCutoff = 0.05, 
+                     readable = TRUE)
+
+ego_ec_a <- enrichGO(gene = names(ec_a_genes), 
+                     universe = rownames(res_a), 
+                     keyType = "SYMBOL", 
+                     OrgDb = org.Mm.eg.db, 
+                     ont = "BP", 
+                     qvalueCutoff = 0.05, 
+                     readable = TRUE)
+
+barplot(ego_ec_t, showCategory = 20)
+barplot(ego_ec_a, showCategory = 20)
+```
+
+

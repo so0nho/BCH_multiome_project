@@ -1,0 +1,461 @@
+---
+title: "Individual preprocessing"
+---
+
+
+
+```{r}
+suppressPackageStartupMessages({
+  library(Signac)
+  library(Seurat)
+  library(tidyverse)
+  library(GenomicRanges)
+  library(EnsDb.Mmusculus.v79)
+  library(BSgenome.Mmusculus.UCSC.mm10)
+  library(DoubletFinder)
+  library(JASPAR2020)
+  library(TFBSTools)
+  library(harmony)
+})
+
+here::i_am("preprocess_individual.Rmd")
+set.seed(1)
+```
+
+
+```{r}
+# gene annotations
+annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Mmusculus.v79)
+seqlevels(annotations) <- paste0('chr', seqlevels(annotations))
+genome(annotations) <- "mm10"
+```
+
+
+```{r}
+neo_data <- Read10X_h5("data/neo/filtered_feature_bc_matrix.h5")
+tac_data <- Read10X_h5("data/4t/filtered_feature_bc_matrix.h5")
+doa_data <- Read10X_h5("doa_data/filtered_feature_bc_matrix.h5")
+
+neo_rna <- neo_data$`Gene Expression`
+neo_atac <- neo_data$Peaks
+
+tac_rna <- tac_data$`Gene Expression`
+tac_atac <- tac_data$Peaks
+
+doa_rna <- doa_data$`Gene Expression`
+doa_atac <- doa_data$Peaks
+
+# standard chromosomes only
+keep_std_chr <- function(atac_counts) {
+  grange.counts <- StringToGRanges(rownames(atac_counts), sep = c(":", "-"))
+  grange.use <- seqnames(grange.counts) %in% standardChromosomes(grange.counts)
+  atac_counts <- atac_counts[as.vector(grange.use), ]
+  
+  return(atac_counts)
+}
+
+neo_atac <- keep_std_chr(neo_atac)
+tac_atac <- keep_std_chr(tac_atac)
+doa_atac <- keep_std_chr(doa_atac)
+
+# create seurat objects
+neo_obj <- CreateSeuratObject(neo_rna, project = "neo")
+tac_obj <- CreateSeuratObject(tac_rna, project = "tac")
+doa_obj <- CreateSeuratObject(doa_rna, project = "doa")
+
+neo_obj[["percent_mt"]] <- PercentageFeatureSet(neo_obj, pattern = "^mt-")
+tac_obj[["percent_mt"]] <- PercentageFeatureSet(tac_obj, pattern = "^mt-")
+doa_obj[["percent_mt"]] <- PercentageFeatureSet(doa_obj, pattern = "^mt-")
+
+neo_obj[["condition"]] <- "Neonate"
+tac_obj[["condition"]] <- "TAC"
+doa_obj[["condition"]] <- ifelse(endsWith(colnames(doa_obj), c("1", "2")), "4M-H", "28M")
+```
+
+
+# Create common peak set
+```{r}
+neo_ranges <- StringToGRanges(rownames(neo_atac), sep = c(":", "-"))
+tac_ranges <- StringToGRanges(rownames(tac_atac), sep = c(":", "-"))
+doa_ranges <- StringToGRanges(rownames(doa_atac), sep = c(":", "-"))
+
+combined_peaks <- reduce(x = c(neo_ranges, tac_ranges, doa_ranges))
+
+
+neo_fragment <- CreateFragmentObject(path = "data/neo/atac_fragments.tsv.gz", cells = colnames(neo_atac))
+neo_atac_count <- FeatureMatrix(fragments = neo_fragment, features = combined_peaks, process_n = 4000) 
+neo_obj[["ATAC"]] <- CreateChromatinAssay(neo_atac_count, fragments = neo_fragment, annotation = annotations)
+
+tac_fragment <- CreateFragmentObject(path = "data/4t/atac_fragments.tsv.gz", cells = colnames(tac_atac))
+tac_atac_count <- FeatureMatrix(fragments = tac_fragment, features = combined_peaks, process_n = 4000) 
+tac_obj[["ATAC"]] <- CreateChromatinAssay(tac_atac_count, fragments = tac_fragment, annotation = annotations)
+
+doa_fragment <- CreateFragmentObject(path = "doa_data/atac_fragments.tsv.gz", cells = colnames(doa_atac))
+doa_atac_count <- FeatureMatrix(fragments = doa_fragment, features = combined_peaks, process_n = 4000) 
+doa_obj[["ATAC"]] <- CreateChromatinAssay(doa_atac_count, fragments = doa_fragment, annotation = annotations)
+```
+
+
+```{r}
+saveRDS(neo_obj, file = "/scratch/kwon.so/neo_obj.rds")
+saveRDS(tac_obj, file = "/scratch/kwon.so/tac_obj.rds")
+saveRDS(doa_obj, file = "/scratch/kwon.so/doa_obj.rds")
+
+neo_obj <- readRDS("/scratch/kwon.so/neo_obj.rds")
+tac_obj <- readRDS("/scratch/kwon.so/tac_obj.rds")
+doa_obj <- readRDS("/scratch/kwon.so/doa_obj.rds")
+```
+
+
+# QC
+```{r}
+DefaultAssay(neo_obj) <- "ATAC"
+neo_obj <- NucleosomeSignal(neo_obj)
+neo_obj <- TSSEnrichment(neo_obj)
+
+VlnPlot(object = neo_obj,
+        features = c("nCount_RNA", "nCount_ATAC", "TSS.enrichment", "nucleosome_signal", "percent_mt"),
+        ncol = 4,
+        pt.size = 0,
+        y.max = NULL)
+
+# filtering low quality cells 
+neo_obj <- subset(
+    x = neo_obj,
+    subset = nCount_RNA < 20000 & nCount_RNA > 200 &
+    nCount_ATAC < 8000 & nCount_ATAC > 20 #&
+    #nucleosome_signal < 2 &
+    #TSS.enrichment > 1 &
+    #percent_mt < 20)
+)
+```
+
+```{r}
+DefaultAssay(tac_obj) <- "ATAC"
+tac_obj <- NucleosomeSignal(tac_obj)
+tac_obj <- TSSEnrichment(tac_obj)
+
+VlnPlot(object = tac_obj,
+        features = c("nCount_RNA", "nCount_ATAC", "TSS.enrichment", "nucleosome_signal", "percent_mt"),
+        ncol = 4,
+        pt.size = 0,
+        y.max = NULL)
+
+## filtering low quality cells
+tac_obj <- subset(
+  x = tac_obj,
+  subset = nCount_RNA < 15000 & nCount_RNA > 200 &
+  nCount_ATAC < 20000 & nCount_ATAC > 100 #&
+  #nucleosome_signal < 2 &
+  #TSS.enrichment > 1 &
+  #percent_mt < 20)
+)
+```
+
+```{r}
+DefaultAssay(doa_obj) <- "ATAC"
+doa_obj <- NucleosomeSignal(doa_obj)
+doa_obj <- TSSEnrichment(doa_obj)
+
+VlnPlot(object = doa_obj,
+        features = c("nCount_RNA", "nCount_ATAC", "TSS.enrichment", "nucleosome_signal", "percent_mt"),
+        ncol = 4,
+        pt.size = 0,
+        y.max = NULL)
+
+## filtering low quality cells
+doa_obj <- subset(
+  x = doa_obj,
+  subset = nCount_RNA < 8000 & nCount_RNA > 200 &
+  nCount_ATAC < 8500 & nCount_ATAC > 100 #&
+  #nucleosome_signal < 2 &
+  #TSS.enrichment > 1 &
+  #percent_mt < 20)
+)
+```
+
+
+```{r}
+saveRDS(neo_obj, file = "/scratch/kwon.so/filtered_neo_obj.rds")
+saveRDS(tac_obj, file = "/scratch/kwon.so/filtered_tac_obj.rds")
+saveRDS(doa_obj, file = "/scratch/kwon.so/filtered_doa_obj.rds")
+
+neo_obj <- readRDS("/scratch/kwon.so/filtered_neo_obj.rds")
+tac_obj <- readRDS("/scratch/kwon.so/filtered_tac_obj.rds")
+doa_obj <- readRDS("/scratch/kwon.so/filtered_doa_obj.rds")
+```
+
+
+# Processing
+```{r}
+process_atac <- function(seu_obj, cut_off = 20) {
+  DefaultAssay(seu_obj) <- "ATAC"
+  
+  seu_obj <- RunTFIDF(seu_obj)
+  seu_obj <- FindTopFeatures(seu_obj, min.cutoff = cut_off)
+  seu_obj <- RunSVD(seu_obj)
+  
+  return(seu_obj)
+}
+
+process_rna <- function(seurat_object, cluster_res = 0.5, dims = 1:30) {
+  DefaultAssay(seurat_object) <- "RNA"
+  
+  seurat_object <- NormalizeData(seurat_object)
+  seurat_object <- FindVariableFeatures(seurat_object)
+  seurat_genes <- rownames(seurat_object)
+  seurat_object <- ScaleData(seurat_object, features = seurat_genes)
+  seurat_object <- RunPCA(seurat_object)
+  seurat_object <- FindNeighbors(seurat_object, dims = dims, reduction = "pca")
+  seurat_object <- FindClusters(seurat_object, resolution = cluster_res)
+  seurat_object <- RunUMAP(seurat_object, dims = dims, reduction = "pca")
+  
+  return(seurat_object)
+}
+
+neo_obj <- process_atac(neo_obj)
+neo_obj <- process_rna(neo_obj)
+
+tac_obj <- process_atac(tac_obj)
+tac_obj <- process_rna(tac_obj)
+
+doa_obj <- process_atac(doa_obj)
+doa_obj <- process_rna(doa_obj)
+```
+
+
+```{r}
+saveRDS(neo_obj, file = "/scratch/kwon.so/processed_neo_obj.rds")
+saveRDS(tac_obj, file = "/scratch/kwon.so/processed_tac_obj.rds")
+saveRDS(doa_obj, file = "/scratch/kwon.so/processed_doa_obj.rds")
+
+neo_obj <- readRDS("/scratch/kwon.so/processed_neo_obj.rds")
+tac_obj <- readRDS("/scratch/kwon.so/processed_tac_obj.rds")
+doa_obj <- readRDS("/scratch/kwon.so/processed_doa_obj.rds")
+```
+
+
+# Doublet detection and removal
+```{r}
+doublet_detect <- function(seu_obj, pcs = 1:10, expected_doublets = 0.05) {
+  DefaultAssay(seu_obj) <- "RNA"
+  
+  sweep.res.list <- paramSweep(seu_obj, PCs = pcs, sct = FALSE)
+  sweep.stats <- summarizeSweep(sweep.res.list, GT = FALSE)
+  bcmvn <- find.pK(sweep.stats)
+  
+  pK_value <- as.numeric(as.character(bcmvn$pK[which.max(bcmvn$BCmetric)]))
+  
+  total_cells <- ncol(seu_obj)
+  expected_doublet <- expected_doublets
+  nExp_poi <- round(total_cells * expected_doublets)
+  
+  seu_obj <- doubletFinder(seu_obj, PCs = pcs, pN = 0.25, pK = pK_value, nExp = nExp_poi)
+  
+  seu_obj@meta.data <- seu_obj@meta.data %>%
+    dplyr::rename("multiplet" = paste0("DF.classifications_0.25_", pK_value, "_", nExp_poi))
+  
+  return(seu_obj)
+}
+
+### change expected doublets as required 
+neo_obj <- doublet_detect(neo_obj, expected_doublets = 0.05)
+tac_obj <- doublet_detect(tac_obj, expected_doublets = 0.05)
+doa_obj <- doublet_detect(doa_obj, expected_doublets = 0.05)
+
+# view doublets
+table(neo_obj@meta.data$multiplet)
+table(tac_obj@meta.data$multiplet)
+table(doa_obj@meta.data$multiplet)
+
+# filter doublets 
+neo_obj <- subset(neo_obj, subset = multiplet == "Singlet")
+tac_obj <- subset(tac_obj, subset = multiplet == "Singlet")
+doa_obj <- subset(doa_obj, subset = multiplet == "Singlet")
+```
+
+
+```{r}
+saveRDS(neo_obj, file = "/scratch/kwon.so/doublet_neo_obj.rds")
+saveRDS(tac_obj, file = "/scratch/kwon.so/doublet_tac_obj.rds")
+saveRDS(doa_obj, file = "/scratch/kwon.so/doublet_doa_obj.rds")
+
+neo_obj <- readRDS("/scratch/kwon.so/doublet_neo_obj.rds")
+tac_obj <- readRDS("/scratch/kwon.so/doublet_tac_obj.rds")
+doa_obj <- readRDS("/scratch/kwon.so/doublet_doa_obj.rds")
+```
+
+
+# Merge and integrate 
+```{r}
+neo_obj[["dataset"]] <- "N"
+tac_obj[["dataset"]] <- "T"
+doa_obj[["dataset"]] <- "D"
+
+DefaultAssay(neo_obj) <- "ATAC"
+DefaultAssay(tac_obj) <- "ATAC"
+DefaultAssay(doa_obj) <- "ATAC"
+
+merged_seu <- merge(x = neo_obj, y = list(tac_obj, doa_obj))
+
+# process ATAC
+merged_seu <- RunTFIDF(merged_seu)
+merged_seu <- FindTopFeatures(merged_seu, min.cutoff = 20)
+merged_seu <- RunSVD(merged_seu)
+
+# integrating ATAC assay -------------------- can try Harmony again but using project.dim = FALSE
+DefaultAssay(merged_seu) <- "ATAC"
+
+integration.anchors <- FindIntegrationAnchors(  
+  object.list = list(neo_obj, tac_obj, doa_obj),
+  anchor.features = rownames(tac_obj),
+  reduction = "rlsi",
+  dims = 2:30
+)
+
+integrated <- IntegrateEmbeddings(  
+  anchorset = integration.anchors,
+  reductions = merged_seu[["lsi"]],
+  new.reduction.name = "integrated_lsi",
+  dims.to.integrate = 1:30, k.weight = 70
+)
+
+integrated <- RunUMAP(integrated, reduction = "integrated_lsi", dims = 2:30, reduction.name = "atac.UMAP")
+DimPlot(integrated, group.by = "condition", reduction = "atac.UMAP")
+
+
+# process RNA
+DefaultAssay(integrated) <- "RNA"
+
+integrated <- NormalizeData(integrated)
+integrated <- FindVariableFeatures(integrated)
+
+all.genes <- rownames(integrated)
+integrated <- ScaleData(integrated, features = all.genes)
+integrated <- RunPCA(integrated)
+
+# integrating RNA assay 
+integrated <- RunHarmony(integrated, "dataset", reduction = "pca", reduction.save = "harmony", assay.use = "RNA")
+integrated <- RunUMAP(integrated, reduction = "harmony", reduction.name = "harmony.UMAP", dims = 1:30)
+DimPlot(integrated, reduction = "harmony.UMAP", group.by = "condition")
+
+integrated[["RNA"]] <- JoinLayers(integrated[["RNA"]])
+```
+
+
+```{r}
+saveRDS(integrated, file = "/scratch/kwon.so/integrated_individual.rds")
+
+integrated <- readRDS("/scratch/kwon.so/integrated_individual.rds")
+```
+
+
+# WNN
+```{r}
+integrated <- FindMultiModalNeighbors(integrated, 
+                                      reduction.list = list("pca", "integrated_lsi"), 
+                                      dims.list = list(1:30, 2:30))
+
+integrated <- RunUMAP(integrated, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
+integrated <- FindClusters(integrated, graph.name = "wsnn", algorithm = 3, verbose = FALSE)
+
+DimPlot(integrated, reduction = "wnn.umap", label = T) + ggtitle("WNN")
+```
+
+
+# Annotate cell types
+CM = 0, 3, 9, 10, 16, 29, 30
+EC = 1, 4, 6, 11, 20, 24, 27, 32
+SMC = 31
+FB = 5, 7, 12, 14, 21, 25, 28, 33, 34
+Macro = 2, 15, 18, 22, 23
+B = 13
+T = 17
+Peri = 8, 19, 26,
+
+"CM", "EC", "Macro", "CM", "EC", "FB", "EC", "FB", "Peri", "CM", "CM", "EC", "FB", "B", "FB", "Macro", "CM", "T", "Macro", "Peri", "EC", "FB", "Macro", "Macro", "EC", "FB", "Peri", "EC", "FB", "CM", "CM", "SMC", "EC", "FB", "FB"
+```{r}
+DefaultAssay(integrated) <- "RNA"
+
+marker_genes <- list(
+  CM = c("Tnnt2", "Actc1", "Myh6", "Myh7", "Myl2", "Myl7"),
+  EC = c("Pecam1", "Cdh5", "Vegfa", "Kdr", "Nos3"),
+  SMC = c("Acta2", "Tagln", "Myh11", "Smtn"),
+  FB = c("Col1a1", "Col3a1", "Postn", "Dcn", "Tcf21"),
+  Macro = c("Adgre1", "Cd68", "Itgam", "Csf1r", "Mrc1"),
+  B_cells = c("Cd19", "Cd79a", "Ms4a1"),   
+  T_cells = c("Cd3e", "Cd4", "Cd8a", "Il7r"),
+  Meso = c("Msln", "Wt1"),
+  Pericytes = c("Pdgfrb", "Cspg4", "Anpep"),
+  Mono = c("Cd14", "Ms4a7"),
+  NK = c("Nkg7"),
+  DC = c("Cst3")
+)
+
+DotPlot(integrated, features = marker_genes)
+
+types <- c("CM", "EC", "Macro", "CM", "EC", "FB", "EC", "FB", "Peri", "CM", "CM", "EC", "FB", "B", "FB", "Macro", "CM", "T", "Macro", "Peri", "EC", "FB", "Macro", "Macro", "EC", "FB", "Peri", "EC", "FB", "CM", "CM", "SMC", "EC", "FB", "FB")
+
+names(types) <- levels(integrated)
+
+new_clusters <- data.frame(cell_type = types) %>% rownames_to_column("cluster")
+
+# rownames as a column (merging removes rownames) 
+integrated@meta.data <- integrated@meta.data %>% 
+  rownames_to_column("cell_barcodes")
+
+# merging  
+integrated@meta.data <- left_join(x = integrated@meta.data, y = new_clusters, 
+                                by = join_by(seurat_clusters == cluster),
+                                relationship = "many-to-one")
+
+# set rownames back
+integrated@meta.data <- integrated@meta.data %>% 
+  column_to_rownames("cell_barcodes")
+
+Idents(integrated) <- integrated$cell_type
+
+DimPlot(integrated, label = T, reduction = "wnn.umap") # group.by = "condition"
+```
+
+
+```{r}
+saveRDS(integrated, file = "/scratch/kwon.so/preprocessed_individual.rds")
+
+integrated <- readRDS("/scratch/kwon.so/preprocessed_individual.rds")
+```
+
+Still need to remove other cell types that might be mixed in. 
+Do FindSubClusters() on the individual cell types
+
+
+# Subclustering
+```{r}
+test <- FindSubCluster(integrated, cluster = "CM", graph.name = "wsnn", subcluster.name = "sub.cluster", resolution = 0.7)
+test@meta.data
+DimPlot(test, reduction = "wnn.umap", label = T, group.by = "sub.cluster")
+
+
+
+integrated
+
+# do findmarkers on each cell type that I found 
+
+```
+
+
+
+
+
+# Explore data
+
+# Cardiomyocyte composition in healhty vs tac and aged
+```{r}
+# cardiomyocyte composition in TAC
+tac_samples <- subset(integrated, subset = condition == "TAC")
+
+
+```
+
+
+
