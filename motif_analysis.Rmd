@@ -23,6 +23,7 @@ suppressPackageStartupMessages({
   library(clusterProfiler)
   library(org.Mm.eg.db)
   library(harmony)
+  library(BiocParallel)
 })
 
 here::i_am("motif_analysis.Rmd")
@@ -62,7 +63,7 @@ preprocessed <- readRDS("/scratch/kwon.so/motif_object.rds")
 ```
 
 
-# Link peaks to genes
+# Link peaks to genes --- takes a long time to run with whole genome 
 ```{r}
 DefaultAssay(preprocessed) <- "ATAC"
 
@@ -73,7 +74,8 @@ preprocessed <- RegionStats(preprocessed, genome = BSgenome.Mmusculus.UCSC.mm10)
 preprocessed <- LinkPeaks(
   object = preprocessed,
   peak.assay = "ATAC",
-  expression.assay = "RNA"
+  expression.assay = "RNA",
+  genes.use = c("Nfe2l1")
 )
 ```
 
@@ -159,7 +161,7 @@ macro_motif %>% dplyr::filter(fold.enrichment > 1.5 & p.adjust < 0.05)
 ```
 
 
-# Differential regions: Conditions
+# Differential regions: Conditions --- Not really ideal. Focus more on individual cell types. 
 ```{r}
 Idents(preprocessed) <- preprocessed$condition
 
@@ -184,33 +186,174 @@ TACvHealth_peak <- readRDS("/scratch/kwon.so/TACvHealth_peak.rds")
 AgedvHealth_peak <- readRDS("/scratch/kwon.so/AgedvHealth_peak.rds")
 
 
-
 # getting top differentially accessible peaks 
-top_TvH <- TACvHealth_peak[TACvHealth_peak$p_val_adj < 0.05, ]
-top_AvH <- AgedvHealth_peak[AgedvHealth_peak$p_val_adj < 0.05, ]
+top_TvH <- TACvHealth_peak %>% dplyr::filter(p_val_adj < 0.05, avg_log2FC > 1)
+top_AvH <- AgedvHealth_peak %>% dplyr::filter(p_val_adj < 0.05, avg_log2FC > 1)
 
 # finding enriched motifs
+# this only compares the peaks input to matched background peaks
 TvH_motif <- FindMotifs(object = preprocessed,
                         features = rownames(top_TvH))
 
 AvH_motif <- FindMotifs(object = preprocessed,
                         features = rownames(top_AvH))
 
+####### need to run footprinting --- check any enriched motifs using the footprinting functions 
+# identifies regions where TFs are likely bound to DNA
+
+
+
 ## Filter enriched motifs
 TvH_motif %>% dplyr::filter(fold.enrichment > 1.5, p.adjust < 0.05)
 AvH_motif %>% dplyr::filter(fold.enrichment > 1.5, p.adjust < 0.05)
 
-CoveragePlot(preprocessed, region = "chr17-39845555-39846528", extend.downstream = 1000, extend.upstream = 1000)
+# 
+tac_unique <- setdiff(rownames(top_TvH), rownames(top_AvH)) # unique in TAC
+aged_unique <- setdiff(rownames(top_AvH), rownames(top_TvH)) # unique in aged
+shared_tac_aged <- intersect(rownames(top_TvH), rownames(top_AvH)) # shared regions
+
+
+##### just for show
+VlnPlot(
+  object = preprocessed,
+  features = rownames(top_TvH)[1],
+  pt.size = 0.001,
+  idents = c("TAC", "28M", "4M-H")
+)
+
+
+```
+
+### Pathway enrichment
+```{r}
+# rn choosing the upregulated accessible regions
+open_T <- ClosestFeature(preprocessed, rownames(top_TvH))
+open_A <- ClosestFeature(preprocessed, rownames(top_AvH))
+
+
+tac_h_ego <- enrichGO(gene = open_T$gene_name,
+                      keyType = "SYMBOL",
+                      OrgDb = org.Mm.eg.db,
+                      ont = "BP",
+                      pAdjustMethod = "BH",
+                      pvalueCutoff = 0.05,
+                      qvalueCutoff = 0.05,
+                      readable = TRUE)
+
+age_h_ego <- enrichGO(gene = open_A$gene_name,
+                      keyType = "SYMBOL",
+                      OrgDb = org.Mm.eg.db,
+                      ont = "BP",
+                      pAdjustMethod = "BH",
+                      pvalueCutoff = 0.05,
+                      qvalueCutoff = 0.05,
+                      readable = TRUE)
+
+barplot(tac_h_ego, showCategory = 20)
+barplot(age_h_ego, showCategory = 20)
+
+
+##### overexpressed pathways on each condition and shared
+tac_close_genes <- ClosestFeature(preprocessed, regions = tac_unique)
+aged_close_genes <- ClosestFeature(preprocessed, regions = aged_unique)
+shared_close_genes <- ClosestFeature(preprocessed, regions = shared_tac_aged)
+
+tac_ego <- enrichGO(gene = tac_close_genes$gene_name,
+                    keyType = "SYMBOL",
+                    OrgDb = org.Mm.eg.db,
+                    ont = "BP",
+                    qvalueCutoff = 0.05,
+                    readable = TRUE)
+
+aged_ego <- enrichGO(gene = aged_close_genes$gene_name,
+                    keyType = "SYMBOL",
+                    OrgDb = org.Mm.eg.db,
+                    ont = "BP",
+                    qvalueCutoff = 0.05,
+                    readable = TRUE)
+
+shared_ego <- enrichGO(gene = shared_close_genes$gene_name,
+                    keyType = "SYMBOL",
+                    OrgDb = org.Mm.eg.db,
+                    ont = "BP",
+                    qvalueCutoff = 0.05,
+                    readable = TRUE)
+
+barplot(tac_ego, showCategory = 20)
+barplot(aged_ego, showCategory = 20)
+barplot(shared_ego, showCategory = 20)
+
+dotplot(tac_ego) + ggtitle("M4T overrepresentation")
+dotplot(aged_ego) + ggtitle("M28 sample pathways")
+
+```
+When doing ORA on both upregulated and downregulated regions --> So it seems like aged samples have an overrepresentation of metabolic processes such as phosphorus metabolic processes, and phosphorylation mechanisms.
+
+Performed overrepresentation analysis on upregulated regions in TAC only, aged only, and shared regions. 
+TAC only regions seem to have an over representation of 
+
+
+# Differential TF activity with Chromvar 
+```{r}
+register(MulticoreParam(8, progressbar = TRUE))
+
+# preprocessed <- RunChromVAR(
+#   object = preprocessed,
+#   genome = BSgenome.Mmusculus.UCSC.mm10
+# )
+
+# saveRDS(preprocessed, file = "/scratch/kwon.so/preprocessed_chromvar.rds")
+preprocessed <- readRDS("/scratch/kwon.so/preprocessed_chromvar.rds")
+
+DefaultAssay(preprocessed) <- "chromvar"
+
+# map motifs to motif names
+motif_names <- GetMotifData(preprocessed[["ATAC"]], slot = "motif.names") %>%
+  data.frame() %>% 
+  pivot_longer(cols = everything(), names_to = "motif", values_to = "motif.name")
+
+motif_markers_tac <- FindMarkers(preprocessed,
+                             ident.1 = "TAC",
+                             ident.2 = "4M-H",
+                             test.use = "wilcox",
+                             mean.fxn = rowMeans,
+                             fc.name = "avg_diff") %>%
+  rownames_to_column("motif") %>% 
+  left_join(motif_names)
+
+motif_markers_age <- FindMarkers(preprocessed,
+                             ident.1 = "28M",
+                             ident.2 = "4M-H",
+                             test.use = "wilcox",
+                             mean.fxn = rowMeans,
+                             fc.name = "avg_diff") %>%
+  rownames_to_column("motif") %>% 
+  left_join(motif_names)
+
+
+
+motif_markers_tac %>% arrange(avg_diff)
+motif_markers_age
+
+MotifPlot(preprocessed, motifs = head(motif_markers_tac$motif.name))
+MotifPlot(preprocessed, motifs = head(motif_markers_age$motif.name))
+
+DefaultAssay(preprocessed) <- "ATAC"
+
+CoveragePlot(preprocessed, region = "Etv2")
 ```
 
 
-# Differential regions: Conditions on each cell type
 
-I think I might need to run peak calling on each annotated cell type using MACS2. 
+# Differential regions: Conditions on each cell type
+```{r}
+Idents(preprocessed) <- preprocessed$condition
+```
+
 ## CM  
 
-Setting significant differential peaks as avg_log2FC > 3 in TAC vs healthy. 
-avg_log2FC > 0.5 in Aged vs health. 
+Try background matching for peaks when running FindMarkers. 
+
 ```{r}
 cm_seu <- subset(preprocessed, subset = cell_type == "CM")
 
@@ -243,31 +386,44 @@ cm_lr_AvH <- readRDS("/scratch/kwon.so/cm_lr_AvH.rds")
 top_cm_TvH <- cm_lr_TvH %>% dplyr::filter(p_val < 0.005, avg_log2FC > 1)
 top_cm_AvH <- cm_lr_AvH %>% dplyr::filter(p_val < 0.005, avg_log2FC > 0.25)
 
+
+# background matching peaks
+open_peaks_tac <- AccessiblePeaks(cm_seu, idents = c("TAC", "4M-H"))
+open_peaks_aged <- AccessiblePeaks(cm_seu, idents = c("28M", "4M-H"))
+
+# match the overall GC content in the peak set
+meta.feature <- GetAssayData(cm_seu, assay = "ATAC", layer = "meta.features")
+
+peaks_matched_tac <- MatchRegionStats(
+  meta.feature = meta.feature[open_peaks_tac, ],
+  query.feature = meta.feature[rownames(top_cm_TvH), ],
+  n = 50000
+)
+
+peaks_matched_aged <- MatchRegionStats(
+  meta.feature = meta.feature[open_peaks_aged, ],
+  query.feature = meta.feature[rownames(top_cm_AvH), ],
+  n = 50000
+)
+
 # test enrichment
 cm_TvH_motif <- FindMotifs(
   object = cm_seu,
-  features = rownames(top_cm_TvH) 
+  features = rownames(top_cm_TvH),
+  background = peaks_matched_tac
 )
 
 cm_AvH_motif <- FindMotifs(
   object = cm_seu,
-  features = rownames(top_cm_AvH)
+  features = rownames(top_cm_AvH),
+  background = peaks_matched_aged
 )
 
-# filtering for significant and enriched motifs ---------- do not filter since it does nothing
-cm_TvH_motif %>% dplyr::filter(fold.enrichment > 1.6 & p.adjust < 0.05)
-cm_AvH_motif %>% dplyr::filter(fold.enrichment > 1.5 & p.adjust < 0.05)
-
-ClosestFeature(cm_seu, rownames(top_cm_TvH))
-ClosestFeature(cm_seu, rownames(top_cm_AvH))
-
-CoveragePlot(preprocessed, "chr1-24612277-24613229", extend.downstream = 500, extend.upstream = 500)
-ClosestFeature(cm_seu, "chr4-6261951-6262851")
+# filtering for significant and enriched motifs ---------- Don't think this does anything...
+# cm_TvH_motif %>% dplyr::filter(fold.enrichment > 1.6 & p.adjust < 0.05)
+# cm_AvH_motif %>% dplyr::filter(fold.enrichment > 1.5 & p.adjust < 0.05)
 ```
-The highest differentially accessible regions between TAC and Healthy are:
-  - `chr1-24612277-24613229` but is kinda sketchy since its only present in TAC and neonates. 
-  - `chr14-35502689-35503562` has high accessibility compared to Healthy. 
-  - `chr4-124652553-124653542` high accessibility but p-adjusted is not significant. 
+
 
 
 ### pathway enrichment for CM

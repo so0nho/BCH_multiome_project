@@ -36,16 +36,12 @@ The steps i need to take to analyze the data are the following:
 - wnn
 - annotate clusters
 
-**Not done yet**
-- Make new notebooks after getting the separate objects. 
+Motif analysis:
+  - 
 
-- identify DARS 
+**Next steps**
+Compare the motifs to gene expression levels. 
+  - Motifs that show a higher gene expression are the ones that are active. 
 
-
-*TODO*
-  - Now that I identified DARS in CMs between FB + EC + MACRO, I will separate out the CMs from combined object and 
-  split by condition to identify further DARS between them. 
-  - should i do Closest features and compare that with the FindMotifs() results. 
-
-
+Clean out data more and remove clusters that show multiple markers. 
 
