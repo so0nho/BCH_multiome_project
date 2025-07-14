@@ -79,8 +79,7 @@ neo_ranges <- StringToGRanges(rownames(neo_atac), sep = c(":", "-"))
 tac_ranges <- StringToGRanges(rownames(tac_atac), sep = c(":", "-"))
 doa_ranges <- StringToGRanges(rownames(doa_atac), sep = c(":", "-"))
 
-combined_peaks <- reduce(x = c(neo_ranges, tac_ranges, doa_ranges))
-
+combined_peaks <- IRanges::reduce(x = c(neo_ranges, tac_ranges, doa_ranges))
 
 neo_fragment <- CreateFragmentObject(path = "data/neo/atac_fragments.tsv.gz", cells = colnames(neo_atac))
 neo_atac_count <- FeatureMatrix(fragments = neo_fragment, features = combined_peaks, process_n = 4000) 
@@ -123,10 +122,10 @@ VlnPlot(object = neo_obj,
 neo_obj <- subset(
     x = neo_obj,
     subset = nCount_RNA < 20000 & nCount_RNA > 200 &
-    nCount_ATAC < 8000 & nCount_ATAC > 20 #&
-    #nucleosome_signal < 2 &
-    #TSS.enrichment > 1 &
-    #percent_mt < 20)
+    nCount_ATAC < 8000 & nCount_ATAC > 20 &
+    nucleosome_signal < 2 &
+    TSS.enrichment > 1 &
+    percent_mt < 20
 )
 ```
 
@@ -145,10 +144,10 @@ VlnPlot(object = tac_obj,
 tac_obj <- subset(
   x = tac_obj,
   subset = nCount_RNA < 15000 & nCount_RNA > 200 &
-  nCount_ATAC < 20000 & nCount_ATAC > 100 #&
-  #nucleosome_signal < 2 &
-  #TSS.enrichment > 1 &
-  #percent_mt < 20)
+  nCount_ATAC < 20000 & nCount_ATAC > 100 &
+  nucleosome_signal < 2 &
+  TSS.enrichment > 1 &
+  percent_mt < 20
 )
 ```
 
@@ -167,10 +166,10 @@ VlnPlot(object = doa_obj,
 doa_obj <- subset(
   x = doa_obj,
   subset = nCount_RNA < 8000 & nCount_RNA > 200 &
-  nCount_ATAC < 8500 & nCount_ATAC > 100 #&
-  #nucleosome_signal < 2 &
-  #TSS.enrichment > 1 &
-  #percent_mt < 20)
+  nCount_ATAC < 8500 & nCount_ATAC > 100 &
+  nucleosome_signal < 2 &
+  TSS.enrichment > 1 &
+  percent_mt < 20
 )
 ```
 
@@ -303,7 +302,7 @@ merged_seu <- RunTFIDF(merged_seu)
 merged_seu <- FindTopFeatures(merged_seu, min.cutoff = 20)
 merged_seu <- RunSVD(merged_seu)
 
-# integrating ATAC assay -------------------- can try Harmony again but using project.dim = FALSE
+# integrating ATAC assay 
 DefaultAssay(merged_seu) <- "ATAC"
 
 integration.anchors <- FindIntegrationAnchors(  
@@ -317,7 +316,7 @@ integrated <- IntegrateEmbeddings(
   anchorset = integration.anchors,
   reductions = merged_seu[["lsi"]],
   new.reduction.name = "integrated_lsi",
-  dims.to.integrate = 1:30, k.weight = 70
+  dims.to.integrate = 1:30, k.weight = 50
 )
 
 integrated <- RunUMAP(integrated, reduction = "integrated_lsi", dims = 2:30, reduction.name = "atac.UMAP")
@@ -350,7 +349,7 @@ integrated <- readRDS("/scratch/kwon.so/integrated_individual.rds")
 ```
 
 
-# WNN
+# WNN 
 ```{r}
 integrated <- FindMultiModalNeighbors(integrated, 
                                       reduction.list = list("pca", "integrated_lsi"), 
@@ -363,17 +362,25 @@ DimPlot(integrated, reduction = "wnn.umap", label = T) + ggtitle("WNN")
 ```
 
 
-# Annotate cell types
-CM = 0, 3, 9, 10, 16, 29, 30
-EC = 1, 4, 6, 11, 20, 24, 27, 32
-SMC = 31
-FB = 5, 7, 12, 14, 21, 25, 28, 33, 34
-Macro = 2, 15, 18, 22, 23
-B = 13
-T = 17
-Peri = 8, 19, 26,
+```{r}
+saveRDS(integrated, file = "/scratch/kwon.so/integrated_wnn.rds")
+integrated <- readRDS("/scratch/kwon.so/integrated_wnn.rds")
+```
 
-"CM", "EC", "Macro", "CM", "EC", "FB", "EC", "FB", "Peri", "CM", "CM", "EC", "FB", "B", "FB", "Macro", "CM", "T", "Macro", "Peri", "EC", "FB", "Macro", "Macro", "EC", "FB", "Peri", "EC", "FB", "CM", "CM", "SMC", "EC", "FB", "FB"
+
+# Annotate cell types ---------- do this again 
+
+CM = 0, 4, 9, 10, 14, 28, 29
+EC = 1, 5, 6, 11, 15, 21^, 24^, 26^, 32
+FB = 2, 8, 12, 17, 25^, 27^, 31^
+Macro = 3, 18, 20, 22^, 23^^
+B = 16
+T = 19
+Peri = 7, 13
+
+SMC/Peri = 30
+
+CM, EC, FB, Macro, CM, EC, EC, Peri, FB, CM, CM, EC, FB, Peri, CM, EC, B, FB, Macro, T, Macro, EC^, Macro^, Macro^^, EC^, FB^, EC^, FB^, CM, CM, SMC/Peri, FB^, EC 
 ```{r}
 DefaultAssay(integrated) <- "RNA"
 
@@ -394,7 +401,7 @@ marker_genes <- list(
 
 DotPlot(integrated, features = marker_genes)
 
-types <- c("CM", "EC", "Macro", "CM", "EC", "FB", "EC", "FB", "Peri", "CM", "CM", "EC", "FB", "B", "FB", "Macro", "CM", "T", "Macro", "Peri", "EC", "FB", "Macro", "Macro", "EC", "FB", "Peri", "EC", "FB", "CM", "CM", "SMC", "EC", "FB", "FB")
+types <- c("CM", "EC", "FB", "Macro", "CM", "EC", "EC", "Peri", "FB", "CM", "CM", "EC", "FB", "Peri", "CM", "EC", "B", "FB", "Macro", "T", "Macro", "EC", "Macro", "Macro", "EC", "FB", "EC", "FB", "CM", "CM", "SMC/Peri", "FB", "EC")
 
 names(types) <- levels(integrated)
 
@@ -415,31 +422,18 @@ integrated@meta.data <- integrated@meta.data %>%
 
 Idents(integrated) <- integrated$cell_type
 
-DimPlot(integrated, label = T, reduction = "wnn.umap") # group.by = "condition"
+DimPlot(integrated, label = T, reduction = "wnn.umap")#, group.by = "condition")
 ```
 
 
 ```{r}
 saveRDS(integrated, file = "/scratch/kwon.so/preprocessed_individual.rds")
-
 integrated <- readRDS("/scratch/kwon.so/preprocessed_individual.rds")
 ```
 
-Still need to remove other cell types that might be mixed in. 
-Do FindSubClusters() on the individual cell types
 
-
-# Subclustering
+## save as h5seurat
 ```{r}
-test <- FindSubCluster(integrated, cluster = "CM", graph.name = "wsnn", subcluster.name = "sub.cluster", resolution = 0.7)
-test@meta.data
-DimPlot(test, reduction = "wnn.umap", label = T, group.by = "sub.cluster")
-
-
-
-integrated
-
-# do findmarkers on each cell type that I found 
 
 ```
 
@@ -447,15 +441,101 @@ integrated
 
 
 
-# Explore data
 
-# Cardiomyocyte composition in healhty vs tac and aged
+
+
+
+# Clean cell types more ------------------ TODO: need to finish this and integrate and so on. 
+Subset CM, FB, EC, and Macro; Process each subset; Cluster them and do DotPlot with the markers again. 
 ```{r}
-# cardiomyocyte composition in TAC
-tac_samples <- subset(integrated, subset = condition == "TAC")
+# subset cell types
+cm_seu <- subset(integrated, subset = cell_type == "CM")
+fb_seu <- subset(integrated, subset = cell_type == "FB")
+ec_seu <- subset(integrated, subset = cell_type == "EC")
+macro_seu <- subset(integrated, subset = cell_type == "Macro")
+
+# process each subset
+process_subset <- function(seu_obj) {
+  # processing RNA
+  DefaultAssay(seu_obj) <- "RNA"
+  seu_obj <- NormalizeData(seu_obj)
+  seu_obj <- FindVariableFeatures(seu_obj)
+  seu_obj <- ScaleData(seu_obj)
+  seu_obj <- RunPCA(seu_obj)
+  
+  # process ATAC
+  DefaultAssay(seu_obj) <- "ATAC"
+  seu_obj <- RunTFIDF(seu_obj)
+  seu_obj <- FindTopFeatures(seu_obj)
+  seu_obj <- RunSVD(seu_obj)
+  
+  # wnn
+  seu_obj <- FindMultiModalNeighbors(seu_obj, reduction.list = list("pca", "lsi"), dims.list = list(1:30, 2:30))
+  seu_obj <- RunUMAP(seu_obj, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
+  seu_obj <- FindClusters(seu_obj, graph.name = "wsnn", resolution = 0.8, algorithm = 3)
+  
+  return(seu_obj)
+}
+
+cm_seu <- process_subset(cm_seu)
+fb_seu <- process_subset(fb_seu)
+ec_seu <- process_subset(ec_seu)
+macro_seu <- process_subset(macro_seu)
+
+# check wnn umaps
+DimPlot(cm_seu, reduction = "wnn.umap", label = T) + ggtitle("CM")
+DimPlot(fb_seu, reduction = "wnn.umap", label = T) + ggtitle("FB")
+DimPlot(ec_seu, reduction = "wnn.umap", label = T) + ggtitle("EC")
+DimPlot(macro_seu, reduction = "wnn.umap", label = T) + ggtitle("Macro")
+
+# DimPlot(cm_seu, reduction = "wnn.umap", label = T, group.by = "condition") + ggtitle("CM")
+# DimPlot(fb_seu, reduction = "wnn.umap", label = T, group.by = "condition") + ggtitle("FB")
+# DimPlot(ec_seu, reduction = "wnn.umap", label = T, group.by = "condition") + ggtitle("EC")
+# DimPlot(macro_seu, reduction = "wnn.umap", label = T, group.by = "condition") + ggtitle("Macro")
+
+# dotplot of markers
+DotPlot(cm_seu, features = marker_genes) # neonates = 7
+DotPlot(fb_seu, features = marker_genes) # neonates = 8
+DotPlot(ec_seu, features = marker_genes) # neonates = 14
+DotPlot(macro_seu, features = marker_genes) # neonates = 8
+
+# remove clusters that show multiple markers 
+cm_seu <- subset(cm_seu, subset = !seurat_clusters %in% c(8, 9, 10, 11))
+fb_seu <- subset(fb_seu, subset = !seurat_clusters %in% c(4, 7, 9, 10, 11, 13))
+ec_seu <- subset(ec_seu, subset = !seurat_clusters %in% c(10, 11, 13, 15))
+macro_seu <- subset(macro_seu, subset = !seurat_clusters %in% c(3, 5, 10, 11))
+
+# merge cell types into one object
+t_seu <- subset(integrated, subset = cell_type == "T")
+b_seu <- subset(integrated, subset = cell_type == "B")
+peri_seu <- subset(integrated, subset = cell_type == "Peri")
+smc_seu <- subset(integrated, subset = cell_type == "SMC/Peri")
+
+clean_seu <- merge(x = cm_seu, y = list(fb_seu, ec_seu, macro_seu, t_seu, b_seu, peri_seu, smc_seu))
+
+# process clean_seu and integrate with harmony
+## process RNA first 
+
+## process ATAC next
+
+## integrate both assay
+
+## join layers
+
+## perform wnn
 
 
+
+##### testing ######
+process_subset(clean_seu) #### do not use the function. integrate first and then do wnn
+
+DefaultAssay(clean_seu) <- "RNA"
+
+DimPlot(clean_seu)
 ```
+
+
+
 
 
 

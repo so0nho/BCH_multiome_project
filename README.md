@@ -23,7 +23,7 @@ it to aging hearts, we can basically reverse aging in hearts.
 3. Do cross comparison of the current project between species (human data)
 
 # Analysis steps
-The steps i need to take to analyze the data are the following:
+Preprocess steps:
 - get data 
 - clean up each dataset and assay 
   - filtering out low quality cells
@@ -44,4 +44,5 @@ Compare the motifs to gene expression levels.
   - Motifs that show a higher gene expression are the ones that are active. 
 
 Clean out data more and remove clusters that show multiple markers. 
+Run preprocess again to remove high mitochondrial percentage. 
 

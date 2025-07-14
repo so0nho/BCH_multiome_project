@@ -93,6 +93,19 @@ for (cell in cell_types) {
 ```
 
 # Differential expression
+
+## All cell types
+Do pseudobulk on all cell types and then do module score for the genes that are involved in hypertrophy and extracellular matrix. 
+```{r}
+tac_seu <- subset(seu_obj, subset = condition %in% c("TAC", "M4H"))
+aged_seu <- subset(seu_obj, subset = condition %in% c("M28", "M4H"))
+
+tac_counts <- FetchData(tac_seu, layer = "counts", vars = rownames(tac_seu)) ############# check this is correct
+
+```
+
+
+
 ## CM
 ```{r}
 cm_TvH <- subset(pbulk_list[["CM"]], subset = condition %in% c("TAC", "M4H"))
@@ -168,20 +181,23 @@ res_cm_df <- res_cm %>%
   data.frame %>% 
   rownames_to_column("gene_symbol") %>% 
   dplyr::filter(padj < 0.05)
+
+write.table(res_t_df, file = "pseudoBulkDEG/CM_tac_deg.tsv")
+write.table(res_a_df, file = "pseudoBulkDEG/CM_aged_deg.tsv")
+
+
+
+res_t_df %>% dplyr::filter(padj < 0.05, log2FoldChange > 1) %>% dplyr::arrange(padj)
+res_t_df %>% dplyr::filter(gene_symbol %in% c("Dmd", "Myh7", "Ankrd1", "Ccn2", "Fgfr2", "Cish", "Cebpb", "Slc8a1"))
 ```
 
 ### Gene set enrichment analysis
 ```{r}
-cm_t_genes <- res_t_df$log2FoldChange
-cm_a_genes <- res_a_df$log2FoldChange
+cm_t_up_genes <- res_t_df[res_t_df$log2FoldChange > 0, ]$gene_symbol
+cm_a_up_genes <- res_a_df[res_a_df$log2FoldChange > 0, ]$gene_symbol
 
-names(cm_t_genes) <- res_t_df$gene_symbol
-names(cm_a_genes) <- res_a_df$gene_symbol
-
-cm_t_genes <- sort(cm_t_genes, decreasing = T)
-cm_a_genes <- sort(cm_a_genes, decreasing = T)
-
-ego_cm_t <- enrichGO(gene = names(cm_t_genes), 
+## ORA on upregulated genes 
+ego_cm_t <- enrichGO(gene = cm_t_up_genes, 
                      universe = rownames(res_t), 
                      keyType = "SYMBOL", 
                      OrgDb = org.Mm.eg.db, 
@@ -189,7 +205,7 @@ ego_cm_t <- enrichGO(gene = names(cm_t_genes),
                      qvalueCutoff = 0.05, 
                      readable = TRUE)
 
-ego_cm_a <- enrichGO(gene = names(cm_a_genes), 
+ego_cm_a <- enrichGO(gene = cm_a_up_genes, 
                      universe = rownames(res_a), 
                      keyType = "SYMBOL", 
                      OrgDb = org.Mm.eg.db, 
@@ -197,10 +213,56 @@ ego_cm_a <- enrichGO(gene = names(cm_a_genes),
                      qvalueCutoff = 0.05, 
                      readable = TRUE)
 
-barplot(ego_cm_t, showCategory = 20)
-barplot(ego_cm_a, showCategory = 20)
+barplot(ego_cm_t, showCategory = 15) + ggtitle("CM TAC")
+barplot(ego_cm_a, showCategory = 15) + ggtitle("CM Aged")
 
-#### USE a heatmap for differentially expressed genes
+data.frame(ego_cm_t) 
+data.frame(ego_cm_a)
+
+
+
+
+data.frame(ego_cm_t) %>% dplyr::filter(str_detect(Description, "extracellular"))
+data.frame(ego_cm_t) %>% dplyr::filter(str_detect(Description, "hypertrophy"))
+```
+
+
+##### need to do GSEA instead of ORA
+```{r eval=FALSE, include=FALSE}
+######### Just doing to select all genes
+cm_res_t_df <- res_t %>% data.frame() %>% rownames_to_column("gene_symbol") %>% dplyr::filter(!is.na(log2FoldChange))
+cm_res_a_df <- res_a %>% data.frame() %>% rownames_to_column("gene_symbol") %>% dplyr::filter(!is.na(log2FoldChange))
+
+## GSEA 
+cm_t_genes <- cm_res_t_df$log2FoldChange      
+cm_a_genes <- cm_res_a_df$log2FoldChange
+
+names(cm_t_genes) <- cm_res_t_df$gene_symbol
+names(cm_a_genes) <- cm_res_a_df$gene_symbol
+
+cm_t_genes <- sort(cm_t_genes, decreasing = T)
+cm_a_genes <- sort(cm_a_genes, decreasing = T)
+
+gsea_cm_t <- gseGO(geneList = cm_t_genes,
+                   OrgDb = org.Mm.eg.db,
+                   keyType = "SYMBOL")
+
+gsea_cm_a <- gseGO(geneList = cm_a_genes,
+                   OrgDb = org.Mm.eg.db,
+                   keyType = "SYMBOL")
+
+
+gsea_cm_t@result
+#### USE a heatmap to visualize differentially expressed genes
+# this is only for differentially expressed genes, not pathway enrichment. 
+norm_cm_t <- counts(dds_T, normalized = T) %>% 
+  data.frame() %>% 
+  dplyr::filter(rownames(.) %in% res_t_df$gene_symbol)
+
+cm_anno_deg <- colData(dds_T) %>% data.frame() %>% dplyr::select("condition")
+pheatmap(norm_cm_t, annotation_col = cm_anno_deg, show_rownames = F)
+
+summary(ego_cm_t)
 ```
 
 ## FB
@@ -279,6 +341,9 @@ res_fb_df <- res_fb %>%
   data.frame %>% 
   rownames_to_column("gene_symbol") %>% 
   dplyr::filter(padj < 0.05)
+
+write.table(res_t_df, file = "pseudoBulkDEG/FB_tac_deg.tsv")
+write.table(res_a_df, file = "pseudoBulkDEG/FB_aged_deg.tsv")
 ```
 
 
@@ -386,6 +451,9 @@ res_ec_df <- res_ec %>%
   data.frame %>% 
   rownames_to_column("gene_symbol") %>% 
   dplyr::filter(padj < 0.05)
+
+write.table(res_t_df, file = "pseudoBulkDEG/EC_tac_deg.tsv")
+write.table(res_a_df, file = "pseudoBulkDEG/EC_aged_deg.tsv")
 ```
 
 ### Overrepresentation 
