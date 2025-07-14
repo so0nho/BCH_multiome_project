@@ -1,0 +1,361 @@
+---
+title: "Integrating data from paper into our object"
+---
+
+
+
+```{r}
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(Signac)
+  library(tidyverse)
+  library(GenomicRanges)
+  library(EnsDb.Mmusculus.v79)
+  library(BSgenome.Mmusculus.UCSC.mm10)
+  library(DoubletFinder)
+  library(JASPAR2020)
+  library(TFBSTools)
+  library(harmony)
+  library(scDblFinder)
+})
+
+here::i_am("integrate_new_data.Rmd")
+set.seed(1)
+```
+
+
+# utility functions
+```{r}
+# create seurat object
+create_seurat <- function(counts, project_name) {
+  seu_obj <- CreateSeuratObject(counts = counts, assay = "RNA", project = project_name)  
+  seu_obj[["percent_mt"]] <- PercentageFeatureSet(seu_obj, pattern = "^mt-")
+  return(seu_obj)
+}
+
+# filter cells
+filter_cells <- function(seu_obj, min_features, max_features, min_cells, max_cells, mt_percent = 20) {
+  seu_obj <- subset(seu_obj, subset = nFeature_RNA > min_features & nFeature_RNA < max_features &
+                      nCount_RNA > min_cells & nCount_RNA < max_cells & percent_mt < mt_percent)
+  return(seu_obj)
+}
+
+# process rna
+process_rna <- function(seu_obj, var_features = 2000) {
+  seu_obj <- NormalizeData(seu_obj)
+  seu_obj <- FindVariableFeatures(seu_obj, nfeatures = var_features)
+  all.genes <- rownames(seu_obj)
+  seu_obj <- ScaleData(seu_obj, features = all.genes)
+  seu_obj <- RunPCA(seu_obj)
+  
+  return(seu_obj)
+}
+
+# gene annotations for peaks
+# annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Mmusculus.v79)
+# seqlevels(annotations) <- paste0('chr', seqlevels(annotations))
+# genome(annotations) <- "mm10"
+# seqlevelsStyle(annotations) <- 'UCSC'
+
+# read ATAC counts
+read_atac <- function(mtx_path, bc_path, bed_path) { ########## changing this part to include the common peak -- first check merged peaks
+  counts <- Matrix::readMM(mtx_path)
+  barcodes <- readLines(bc_path)
+  peaks <- read.table(bed_path, sep = "\t") #, col.names = c("chr", "start", "end"))
+  peaknames <- paste(peaks$V1, peaks$V2, peaks$V3, sep = "-")
+  
+  # genomic_ranges <- makeGRangesFromDataFrame(peaks)
+  
+  colnames(counts) <- barcodes
+  rownames(counts) <- peaknames
+  
+  return(counts)
+}
+
+# keep standard chromosomes
+standard_chr <- function(atac_counts) {
+  grange.counts <- StringToGRanges(rownames(atac_counts), sep = c("-", "-"))
+  grange.use <- seqnames(grange.counts) %in% standardChromosomes(grange.counts)
+  atac_counts <- atac_counts[as.vector(grange.use), ]
+  
+  return(atac_counts)
+}
+
+# process ATAC assay
+process_atac <- function(atac_seu) {
+  atac_seu <- RunTFIDF(atac_seu)
+  atac_seu <- FindTopFeatures(atac_seu, min.cutoff = 20)
+  atac_seu <- RunSVD(atac_seu)
+  
+  return(atac_seu)
+}
+
+```
+
+
+# iScience paper scRNA data ------- find a way to make it a loop instead of writing everything by hand and correcting
+```{r}
+# samps <- list(m3_1, m3_2, m12_1, m12_2, m24_1, m24_2)
+
+# for reading data  -------- check that it works first 
+# rna_path <- "data/paper/rna/" 
+# for(samp in samps) { 
+#   samp <- Read10X(paste0(rna_path, samp))
+#   samp <- create_seurat(counts = samp, project_name = samp)
+# }
+
+
+
+# reading counts
+m3_1_counts <- Read10X("data/paper/rna/m3_1/")
+m3_2_counts <- Read10X("data/paper/rna/m3_2/")
+m12_1_counts <- Read10X("data/paper/rna/m12_1/")
+m12_2_counts <- Read10X("data/paper/rna/m12_2/")
+m24_1_counts <- Read10X("data/paper/rna/m24_1/")
+m24_2_counts <- Read10X("data/paper/rna/m24_2/")
+
+
+m3_1_seu <- create_seurat(counts = m3_1_counts, project_name = "m3_1")
+m3_2_seu <- create_seurat(counts = m3_2_counts, project_name = "m3_2")
+m12_1_seu <- create_seurat(counts = m12_1_counts, project_name = "m12_1")
+m12_2_seu <- create_seurat(counts = m12_2_counts, project_name = "m12_2")
+m24_1_seu <- create_seurat(counts = m24_1_counts, project_name = "m24_1")
+m24_2_seu <- create_seurat(counts = m24_2_counts, project_name = "m24_2")
+
+# QC
+VlnPlot(m3_1_seu, features = c("nFeature_RNA", "nCount_RNA", "percent_mt"), ncol = 3)
+VlnPlot(m3_2_seu, features = c("nFeature_RNA", "nCount_RNA", "percent_mt"), ncol = 3)
+VlnPlot(m12_1_seu, features = c("nFeature_RNA", "nCount_RNA", "percent_mt"), ncol = 3)
+VlnPlot(m12_2_seu, features = c("nFeature_RNA", "nCount_RNA", "percent_mt"), ncol = 3)
+VlnPlot(m24_1_seu, features = c("nFeature_RNA", "nCount_RNA", "percent_mt"), ncol = 3)
+VlnPlot(m24_2_seu, features = c("nFeature_RNA", "nCount_RNA", "percent_mt"), ncol = 3)
+
+# filter outliers 
+m3_1_seu <- filter_cells(m3_1_seu, min_features = 200, max_features = 7700, min_cells = 200, max_cells = 50000)
+m3_2_seu <- filter_cells(m3_2_seu, min_features = 200, max_features = 7700, min_cells = 200, max_cells = 50000)
+m12_1_seu <- filter_cells(m12_1_seu, min_features = 200, max_features = 7700, min_cells = 200, max_cells = 50000)
+m12_2_seu <- filter_cells(m12_2_seu, min_features = 200, max_features = 7700, min_cells = 200, max_cells = 50000)
+m24_1_seu <- filter_cells(m24_1_seu, min_features = 200, max_features = 7700, min_cells = 200, max_cells = 50000)
+m24_2_seu <- filter_cells(m24_2_seu, min_features = 200, max_features = 7700, min_cells = 200, max_cells = 50000)
+
+# detect doublets
+## scDblFinder input is sce
+sce3_1 <- as.SingleCellExperiment(m3_1_seu) %>% scDblFinder()
+sce3_2 <- as.SingleCellExperiment(m3_2_seu) %>% scDblFinder()
+sce12_1 <- as.SingleCellExperiment(m12_1_seu) %>% scDblFinder()
+sce12_2 <- as.SingleCellExperiment(m12_2_seu) %>% scDblFinder()
+sce24_1 <- as.SingleCellExperiment(m24_1_seu) %>% scDblFinder()
+sce24_2 <- as.SingleCellExperiment(m24_2_seu) %>% scDblFinder()
+
+sce3_1_scores <- sce3_1@colData %>% data.frame() %>% dplyr::select(scDblFinder.class)
+sce3_2_scores <- sce3_2@colData %>% data.frame() %>% dplyr::select(scDblFinder.class)
+sce12_1_scores <- sce12_1@colData %>% data.frame() %>% dplyr::select(scDblFinder.class)
+sce12_2_scores <- sce12_2@colData %>% data.frame() %>% dplyr::select(scDblFinder.class)
+sce24_1_scores <- sce24_1@colData %>% data.frame() %>% dplyr::select(scDblFinder.class)
+sce24_2_scores <- sce24_2@colData %>% data.frame() %>% dplyr::select(scDblFinder.class)
+
+# add to seurat object and remove doublets 
+m3_1_seu <- AddMetaData(m3_1_seu, metadata = sce3_1_scores) %>% subset(subset = scDblFinder.class == "singlet")
+m3_2_seu <- AddMetaData(m3_2_seu, metadata = sce3_2_scores) %>% subset(subset = scDblFinder.class == "singlet")
+m12_1_seu <- AddMetaData(m12_1_seu, metadata = sce12_1_scores) %>% subset(subset = scDblFinder.class == "singlet")
+m12_2_seu <- AddMetaData(m12_2_seu, metadata = sce12_2_scores) %>% subset(subset = scDblFinder.class == "singlet")
+m24_1_seu <- AddMetaData(m24_1_seu, metadata = sce24_1_scores) %>% subset(subset = scDblFinder.class == "singlet")
+m24_2_seu <- AddMetaData(m24_2_seu, metadata = sce24_2_scores) %>% subset(subset = scDblFinder.class == "singlet")
+
+# process rna
+m3_1_seu <- process_rna(m3_1_seu)
+m3_2_seu <- process_rna(m3_2_seu)
+m12_1_seu <- process_rna(m12_1_seu)
+m12_2_seu <- process_rna(m12_2_seu)
+m24_1_seu <- process_rna(m24_1_seu)
+m24_2_seu <- process_rna(m24_1_seu)
+
+# merge datasets
+merged_rna <- merge(m3_1_seu, y = list(m3_2_seu, m12_1_seu, m12_2_seu, m24_1_seu, m24_2_seu))
+
+# process merged object
+merged_rna <- process_rna(merged_rna)
+
+merged_rna <- FindNeighbors(merged_rna, dims = 1:30, reduction = "pca")
+merged_rna <- FindClusters(merged_rna, resolution = 0.8)
+merged_rna <- RunUMAP(merged_rna, dims = 1:30, reduction = "pca", reduction.name = "umap")
+DimPlot(merged_rna, reduction = "umap", group.by = "seurat_clusters")
+  
+# join layers
+merged_rna[["RNA"]] <- JoinLayers(merged_rna[["RNA"]])
+
+
+# saving merged RNA object
+# write_rds(merged_rna, file = "/scratch/kwon.so/paper_data_merged_rna.rds")
+merged_rna <- read_rds("/scratch/kwon.so/paper_data_merged_rna.rds")
+```
+
+
+# Integrate with our object 
+Make sure that data integrates correctly since our data is snRNA and this data is scRNA. 
+check umap by origin data and by cell type????
+```{r}
+our_seu <- read_rds("/scratch/kwon.so/preprocessed_individual.rds")
+merged_seu <- merge(x = our_seu, y = merged_rna)
+
+# process data
+merged_seu <- process_rna(merged_seu)
+
+# harmony integration
+merged_seu <- IntegrateLayers(merged_seu, method = HarmonyIntegration, 
+                              orig.reduction = "pca", new.reduction = "harmony")
+
+merged_seu <- FindNeighbors(merged_seu, dims = 1:30, reduction = "harmony")
+merged_seu <- FindClusters(merged_seu, resolution = 0.8)
+merged_seu <- RunUMAP(merged_seu, dims = 1:30, reduction = "harmony", reduction.name = "harmony.umap")
+DimPlot(merged_seu, reduction = "harmony.umap", group.by = "orig.ident")
+
+merged_seu[["RNA"]] <- JoinLayers(merged_seu[["RNA"]])
+
+
+# removing scale data layers 
+merged_seu <- DietSeurat(merged_seu, layers = c("data", "counts", "scale.data"), 
+                         dimreducs = c("pca", "harmony", "harmony.umap"))
+
+# write_rds(merged_seu, "/scratch/kwon.so/merged_seu")
+merged_seu <- read_rds("/scratch/kwon.so/merged_seu") 
+```
+DietSeurat removes scale data layers from previous merges, graphs (created using neighbors), and kept dimreducs. 
+
+
+
+# Zhang et al. data integration
+Only use 3 and 12 months. Keep only CMs from this data and then integrate it with the merged seurat. 
+```{r}
+
+```
+
+
+
+
+
+Integrate data from science paper too before annotating. 
+And integrated our data M24 too. 
+
+
+# Annotate clusters ;;;;;;;;;; do so that each cell type subclusters
+```{r}
+
+```
+
+
+
+
+
+**Still need to annotate clusters** Do after WNN
+I am thinking of doing wnn between RNA and ATAC data but not sure if i should be able to do so. 
+
+##### Need to get fragment files first before doing ATAC analysis. #####
+
+
+# scATAC data
+```{r}
+
+################### I have to create a combined peakset 
+
+base_path <- "data/paper/atac/"
+
+m3_1_counts <- read_atac(mtx_path = Sys.glob(paste0(base_path, "m3_1/*mtx.gz")), 
+                        bc_path = Sys.glob(paste0(base_path, "m3_1/*barcodes.tsv.gz")),
+                        bed_path = Sys.glob(paste0(base_path, "m3_1/*bed.gz"))) %>% standard_chr()
+
+m3_2_counts <- read_atac(mtx_path = Sys.glob(paste0(base_path, "m3_2/*mtx.gz")), 
+                        bc_path = Sys.glob(paste0(base_path, "m3_2/*barcodes.tsv.gz")),
+                        bed_path = Sys.glob(paste0(base_path, "m3_2/*bed.gz"))) %>% standard_chr()
+
+m12_1_counts <- read_atac(mtx_path = Sys.glob(paste0(base_path, "m12_1/*mtx.gz")), 
+                        bc_path = Sys.glob(paste0(base_path, "m12_1/*barcodes.tsv.gz")),
+                        bed_path = Sys.glob(paste0(base_path, "m12_1/*bed.gz"))) %>% standard_chr()
+
+m12_2_counts <- read_atac(mtx_path = Sys.glob(paste0(base_path, "m12_2/*mtx.gz")), 
+                        bc_path = Sys.glob(paste0(base_path, "m12_2/*barcodes.tsv.gz")),
+                        bed_path = Sys.glob(paste0(base_path, "m12_2/*bed.gz"))) %>% standard_chr()
+
+m24_1_counts <- read_atac(mtx_path = Sys.glob(paste0(base_path, "m24_1/*mtx.gz")), 
+                        bc_path = Sys.glob(paste0(base_path, "m24_1/*barcodes.tsv.gz")),
+                        bed_path = Sys.glob(paste0(base_path, "m24_1/*bed.gz"))) %>% standard_chr()
+
+m24_2_counts <- read_atac(mtx_path = Sys.glob(paste0(base_path, "m24_2/*mtx.gz")), 
+                        bc_path = Sys.glob(paste0(base_path, "m24_2/*barcodes.tsv.gz")),
+                        bed_path = Sys.glob(paste0(base_path, "m24_2/*bed.gz"))) %>% standard_chr()
+
+
+### at the creating counts step is where you are supposed to use common peak set 
+# chekcing there is a fragments -- used with seurat object
+Fragments(m24_2_peaks)
+CoveragePlot(m24_2_peaks, region = "chr1-3119565-3120443")
+m24_2_peaks@assays$peaks$counts
+read.table("data/paper/atac/m24_2/GSM8527854_2_ATAC_peaks.bed.gz", sep = "\t", col.names = c("chr", "start", "end"))
+
+###### need to use combined peaks 
+### try merging first without combining peaks and check umap to see if there isnt overlap
+
+# create objects
+m3_1_assay <- CreateChromatinAssay(counts = m3_1_counts, sep = c("-", "-"), min.features = 500, annotation = annotations)
+m3_1_peaks <- CreateSeuratObject(m3_1_assay, assay = "peaks", project = "m3_1")
+
+m3_2_assay <- CreateChromatinAssay(counts = m3_2_counts, sep = c("-", "-"), min.features = 500, annotation = annotations)
+m3_2_peaks <- CreateSeuratObject(m3_2_assay, assay = "peaks", project = "m3_2")
+
+m12_1_assay <- CreateChromatinAssay(counts = m12_1_counts, sep = c("-", "-"), min.features = 500, annotation = annotations)
+m12_1_peaks <- CreateSeuratObject(m12_1_assay, assay = "peaks", project = "m12_1")
+
+m12_2_assay <- CreateChromatinAssay(counts = m12_2_counts, sep = c("-", "-"), min.features = 500, annotation = annotations)
+m12_2_peaks <- CreateSeuratObject(m12_2_assay, assay = "peaks", project = "m12_2")
+
+m24_1_assay <- CreateChromatinAssay(counts = m24_1_counts, sep = c("-", "-"), min.features = 500, annotation = annotations)
+m24_1_peaks <- CreateSeuratObject(m24_1_assay, assay = "peaks", project = "m24_1")
+
+m24_2_assay <- CreateChromatinAssay(counts = m24_2_counts, sep = c("-", "-"), min.features = 500, annotation = annotations)
+m24_2_peaks <- CreateSeuratObject(m24_2_assay, assay = "peaks", project = "m24_2")
+
+# process each individual object first before merging (QC, subset, etc...)
+
+
+
+# merge peaks
+merged_atac <- merge(x = m3_1_peaks, 
+                     y = list(m3_2_peaks, m12_1_peaks, m12_2_peaks, m24_1_peaks, m24_2_peaks))
+
+# write_rds(merged_atac, "/scratch/kwon.so/new_data_merged_atac.rds")
+merged_atac <- read_rds("/scratch/kwon.so/new_data_merged_atac.rds")
+
+# process ATAC
+merged_atac <- process_atac(merged_atac)
+
+
+
+#########
+test_atac <- RunUMAP(merged_atac, dims = 2:50, reduction = 'lsi')
+DimPlot(test_atac, group.by = 'orig.ident', pt.size = 0.1, split.by = "orig.ident") # check if the different seurats overlap or not 
+
+
+# test integration --- seeing if this fixes the issue of batch effect instead of combining peaks
+
+
+```
+
+
+
+
+# WNN
+```{r}
+
+```
+
+
+
+
+
+
+
+# Integrate with our object
+```{r}
+int_seu <- readRDS("/scratch/kwon.so/preprocessed_individual.rds")
+```
+
